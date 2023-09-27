@@ -1,24 +1,25 @@
 package stego
 
 import (
-	"fmt"
 	"image"
 	"math/rand"
 )
 
 type InstructionFactory struct {
-	random *rand.Rand
-	maxX   int
-	maxY   int
-	used   map[string]bool
+	random    *rand.Rand
+	maxX      int
+	maxY      int
+	remaining int
+	used      map[[3]int]bool
 }
 
 func NewInstructionFactory(random *rand.Rand, maxX int, maxY int) *InstructionFactory {
 	return &InstructionFactory{
-		random: random,
-		maxX:   maxX,
-		maxY:   maxY,
-		used:   map[string]bool{},
+		random:    random,
+		maxX:      maxX,
+		maxY:      maxY,
+		remaining: maxX * maxY * 3, // Remaining number of instructions
+		used:      map[[3]int]bool{},
 	}
 }
 
@@ -26,13 +27,15 @@ func (i *InstructionFactory) New() *Instruction {
 	x := i.random.Intn(i.maxX)
 	y := i.random.Intn(i.maxY)
 	channel := i.random.Intn(3)
-	uniqueKey := fmt.Sprintf("%d,%d,%d", x, y, channel)
+	uniqueKey := [3]int{x, y, channel}
+
 	if i.used[uniqueKey] {
 		for {
 			x = i.random.Intn(i.maxX)
 			y = i.random.Intn(i.maxY)
 			channel = i.random.Intn(3)
-			newUniqueKey := fmt.Sprintf("%d,%d,%d", x, y, channel)
+			newUniqueKey := [3]int{x, y, channel}
+
 			if !i.used[newUniqueKey] {
 				i.used[newUniqueKey] = true
 				break
@@ -41,6 +44,8 @@ func (i *InstructionFactory) New() *Instruction {
 	} else {
 		i.used[uniqueKey] = true
 	}
+
+	i.remaining -= 1
 	return &Instruction{X: x, Y: y, Channel: channel}
 }
 
@@ -54,7 +59,6 @@ func (i *Instruction) Read(img *image.RGBA) bool {
 	rgba := img.RGBAAt(i.X, i.Y)
 
 	var channel uint8
-
 	switch i.Channel {
 	case 0: // red
 		channel = rgba.R
@@ -70,49 +74,20 @@ func (i *Instruction) Read(img *image.RGBA) bool {
 func (i *Instruction) Write(bit bool, img *image.RGBA) {
 	rgba := img.RGBAAt(i.X, i.Y)
 
+	var bitFunc func(uint8) uint8
+	if bit {
+		bitFunc = makeEven
+	} else {
+		bitFunc = makeOdd
+	}
+
 	switch i.Channel {
 	case 0: // red
-		if bit { // bit is "1" so needs to be even
-			if rgba.R%2 != 0 {
-				if rgba.R == 255 { // isnt even
-					rgba.R -= 1
-				} else {
-					rgba.R += 1
-				}
-			}
-		} else { // bit is "0" so needs to be odd
-			if rgba.R%2 == 0 { // is even
-				rgba.R += 1
-			}
-		}
+		rgba.R = bitFunc(rgba.R)
 	case 1: // green
-		if bit { // bit is "1" so needs to be even
-			if rgba.G%2 != 0 { // isnt even
-				if rgba.G == 255 {
-					rgba.G -= 1
-				} else {
-					rgba.G += 1
-				}
-			}
-		} else { // bit is "0" so needs to be odd
-			if rgba.G%2 == 0 { // is even
-				rgba.G += 1
-			}
-		}
+		rgba.G = bitFunc(rgba.G)
 	case 2: // blue
-		if bit { // bit is "1" so needs to be even
-			if rgba.B%2 != 0 { // isnt even
-				if rgba.B == 255 {
-					rgba.B -= 1
-				} else {
-					rgba.B += 1
-				}
-			}
-		} else { // bit is "0" so needs to be odd
-			if rgba.B%2 == 0 { // is even
-				rgba.B += 1
-			}
-		}
+		rgba.B = bitFunc(rgba.B)
 	}
 
 	img.SetRGBA(i.X, i.Y, rgba)

@@ -1,8 +1,6 @@
 package stego
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"fmt"
 	"image"
 )
@@ -13,13 +11,8 @@ func EmbedData(key string, plainText []byte, img *image.RGBA) error {
 	derivedKey := deriveKey(key, salt)
 	random := predictableRandom(derivedKey)
 
-	block, err := aes.NewCipher(derivedKey)
-	if err != nil {
-		return err
-	}
-
 	iv := make([]byte, 12)
-	_, err = random.Read(iv)
+	_, err := random.Read(iv)
 	if err != nil {
 		return err
 	}
@@ -30,39 +23,55 @@ func EmbedData(key string, plainText []byte, img *image.RGBA) error {
 		return err
 	}
 
-	aesGcm, err := cipher.NewGCM(block)
+	cipherText, err := encrypt(derivedKey, iv, additionalData, plainText)
 	if err != nil {
 		return err
 	}
 
-	cipherText := aesGcm.Seal(nil, iv, plainText, additionalData)
-
 	instructionFactory := NewInstructionFactory(random, rect.Max.X, rect.Max.Y)
 
-	// reserve 3 bytes worth of instructions
-	lengthInstructions := make([]*Instruction, 9*8)
-	for index := 0; index < 9*8; index++ {
-		lengthInstructions[index] = instructionFactory.New()
+	// 3 bytes for X, 3 bytes for Y
+	lastXYInstructions := make([]*Instruction, 4*8)
+	for index := 0; index < len(lastXYInstructions); index++ {
+		lastXYInstructions[index] = instructionFactory.New()
+	}
+
+	// 2 bits for channel
+	lastChannelInstructions := make([]*Instruction, 2)
+	for index := 0; index < len(lastChannelInstructions); index++ {
+		lastChannelInstructions[index] = instructionFactory.New()
 	}
 
 	// encode cipher text
 	var lastInstruction *Instruction
-	bits := bytesToBoolArray(cipherText, 8)
+	bits := toBoolArray[byte](cipherText, 8)
 	for _, bit := range bits {
 		lastInstruction = instructionFactory.New()
 		lastInstruction.Write(bit, img)
 	}
 
 	// turn last generated instruction into message that fits into lengthInstructions
-	lengthBits := intArrayToBoolArray([]int{
+	lastXYBits := toBoolArray[int]([]int{
 		lastInstruction.X,
 		lastInstruction.Y,
-		lastInstruction.Channel,
-	}, 24)
+	}, 16)
 
-	// encode lengthBits
-	for index, instruction := range lengthInstructions {
-		instruction.Write(lengthBits[index], img)
+	lastChannelBits := toBoolArray[int]([]int{
+		lastInstruction.Channel,
+	}, 2)
+
+	// write
+	for index, instruction := range lastXYInstructions {
+		instruction.Write(lastXYBits[index], img)
+	}
+
+	for index, instruction := range lastChannelInstructions {
+		instruction.Write(lastChannelBits[index], img)
+	}
+
+	for index := 0; index < instructionFactory.remaining; index++ {
+		bit := random.Intn(2)
+		instructionFactory.New().Write(bit == 1, img)
 	}
 
 	return nil
@@ -74,13 +83,8 @@ func ReadEmbededData(key string, img *image.RGBA) ([]byte, error) {
 	derivedKey := deriveKey(key, salt)
 	random := predictableRandom(derivedKey)
 
-	block, err := aes.NewCipher(derivedKey)
-	if err != nil {
-		return nil, err
-	}
-
 	iv := make([]byte, 12)
-	_, err = random.Read(iv)
+	_, err := random.Read(iv)
 	if err != nil {
 		return nil, err
 	}
@@ -93,41 +97,44 @@ func ReadEmbededData(key string, img *image.RGBA) ([]byte, error) {
 
 	instructionFactory := NewInstructionFactory(random, rect.Max.X, rect.Max.Y)
 
-	lengthBits := make([]bool, 9*8)
-	for index := 0; index < 9*8; index++ {
-		instruction := instructionFactory.New()
-		lengthBits[index] = instruction.Read(img)
+	lastXYBits := make([]bool, 4*8)
+	for index := 0; index < len(lastXYBits); index++ {
+		lastXYBits[index] = instructionFactory.New().Read(img)
 	}
-	lengthBytes := boolArrayToIntArray(lengthBits, 24)
+
+	lastChannelBits := make([]bool, 2)
+	for index := 0; index < len(lastChannelBits); index++ {
+		lastChannelBits[index] = instructionFactory.New().Read(img)
+	}
+
+	lastXYBytes := fromBoolArray[int](lastXYBits, 16)
+	lastChannelBytes := fromBoolArray[int](lastChannelBits, 2)
+
 	lastInstruction := &Instruction{
-		X:       lengthBytes[0],
-		Y:       lengthBytes[1],
-		Channel: lengthBytes[2],
+		X:       lastXYBytes[0],
+		Y:       lastXYBytes[1],
+		Channel: lastChannelBytes[0],
 	}
 
 	instructions := []*Instruction{}
 	for {
 		instruction := instructionFactory.New()
 		instructions = append(instructions, instruction)
-		if lastInstruction.X == instruction.X && lastInstruction.Y == instruction.Y && lastInstruction.Channel == instruction.Channel {
+		if lastInstruction.X == instruction.X &&
+			lastInstruction.Y == instruction.Y &&
+			lastInstruction.Channel == instruction.Channel {
 			break
 		}
 	}
 
 	bits := make([]bool, len(instructions))
-	for index := len(instructions) - 1; index != -1; index-- {
+	for index := len(bits) - 1; index != -1; index-- {
 		instruction := instructions[index]
 		bits[index] = instruction.Read(img)
 	}
 
-	cipherText := boolArrayToBytes(bits, 8)
-
-	aesGcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-
-	plainText, err := aesGcm.Open(nil, iv, cipherText, additionalData)
+	cipherText := fromBoolArray[byte](bits, 8)
+	plainText, err := decrypt(derivedKey, iv, additionalData, cipherText)
 	if err != nil {
 		return nil, err
 	}
